@@ -217,3 +217,105 @@ def test_deleting_a_document_removes_its_chunks_and_vectors(db, rag, ingest):
     ).count() == 0
     assert rag.store.count() == 0
     assert retrieve(db, "cancellation", embeddings=rag.embeddings, store=rag.store) == []
+
+
+# ==========================================================================
+# Audit redaction (Milestone 3B hardening)
+# ==========================================================================
+def test_booking_pii_is_not_written_to_the_audit_log(db, agent, rag):
+    """Redaction happens at WRITE time: the PII must not be in the row."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from app.governance.engine import GovernanceEngine
+    from app.models import AuditLog, Conversation, Service
+
+    convo = Conversation(session_token="redact-sess-" + "q" * 20)
+    db.add(convo)
+    db.commit()
+
+    service = db.query(Service).first()
+    day = datetime.now(timezone.utc) + timedelta(days=1)
+    while day.weekday() > 4:
+        day += timedelta(days=1)
+
+    engine = GovernanceEngine(db, agent_id=agent.id, conversation_id=convo.id)
+    slot = engine.execute(
+        "check_availability",
+        {"service_id": service.id, "date": day.date().isoformat()},
+    ).data["slots"][0]
+    engine.execute("book_appointment", {
+        "service_id": service.id, "starts_at": slot,
+        "customer_name": "Asha Rao", "customer_email": "asha@example.com",
+    })
+
+    row = (
+        db.query(AuditLog)
+        .filter(AuditLog.tool_name == "book_appointment")
+        .order_by(AuditLog.id.desc()).first()
+    )
+    stored = json.loads(row.params_json)
+
+    assert stored["customer_name"] == "[redacted]"
+    assert stored["customer_email"] == "[redacted]"
+    assert "Asha Rao" not in row.params_json
+    assert "asha@example.com" not in row.params_json
+    # Operationally useful fields survive.
+    assert stored["service_id"] == service.id
+    assert stored["starts_at"] == slot
+
+
+def test_redaction_does_not_break_non_sensitive_params(db, agent):
+    import json
+
+    from app.governance.engine import GovernanceEngine
+    from app.models import AuditLog
+
+    GovernanceEngine(db, agent_id=agent.id).execute(
+        "search_services", {"query": "review"}
+    )
+    row = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    assert json.loads(row.params_json) == {"query": "review"}
+
+
+def test_long_free_text_is_truncated_not_stored_whole(db, agent):
+    import json
+
+    from app.governance.engine import GovernanceEngine
+    from app.models import AuditLog, Conversation
+
+    convo = Conversation(session_token="trunc-sess-" + "r" * 20)
+    db.add(convo)
+    db.commit()
+
+    long_summary = "x" * 900
+    GovernanceEngine(db, agent_id=agent.id, conversation_id=convo.id).execute(
+        "escalate_to_human", {"reason": "billing", "summary": long_summary}
+    )
+    row = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    stored = json.loads(row.params_json)
+    assert "truncated" in stored["summary"]
+    assert len(stored["summary"]) < 300
+
+
+def test_action_requests_keep_real_parameters_for_execution(db, agent, booked_appointment):
+    """Redaction must NOT touch action_requests -- the approved action has
+    to execute with the real values, and the hash is computed over them."""
+    import json
+
+    from app.governance.action_requests import compute_params_hash
+    from app.governance.engine import GovernanceEngine
+    from app.models import ActionRequest
+    from app.models.enums import Permission
+    from tests.conftest import grant
+
+    grant(db, agent, Permission.CANCEL_APPOINTMENT)
+    result = GovernanceEngine(db, agent_id=agent.id).execute(
+        "cancel_appointment",
+        {"appointment_id": booked_appointment.id, "reason": "real reason"},
+    )
+    row = db.get(ActionRequest, result.action_request_id)
+    params = json.loads(row.params_json)
+
+    assert params["appointment_id"] == booked_appointment.id
+    assert row.params_hash == compute_params_hash("cancel_appointment", params)

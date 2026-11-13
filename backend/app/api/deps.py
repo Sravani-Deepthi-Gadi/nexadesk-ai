@@ -1,6 +1,8 @@
 """Shared FastAPI dependencies."""
 from functools import lru_cache
 
+from fastapi import HTTPException, status
+
 from sqlalchemy.orm import Session
 
 from app.agent.llm.base import LLMProvider
@@ -11,13 +13,32 @@ from app.models import Agent
 
 
 @lru_cache
-def get_llm() -> LLMProvider:
+def _build_llm() -> LLMProvider:
     settings = get_settings()
     if settings.llm_provider == "claude":
         return ClaudeProvider(
             api_key=settings.anthropic_api_key, model=settings.llm_model
         )
     raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
+
+
+def get_llm() -> LLMProvider:
+    """Resolve the LLM provider, or fail as a configuration problem.
+
+    A missing API key is an operator mistake, not a server fault. Letting
+    the ValueError escape produces a 500 and a stack trace in the log for
+    something a one-line .env change fixes, and tells the customer nothing.
+    """
+    try:
+        return _build_llm()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "The assistant is not configured yet. "
+                "An administrator needs to set ANTHROPIC_API_KEY."
+            ),
+        ) from exc
 
 
 def get_default_agent(db: Session) -> Agent:

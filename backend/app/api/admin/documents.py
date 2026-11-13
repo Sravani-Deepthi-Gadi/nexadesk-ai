@@ -1,4 +1,5 @@
 """Admin knowledge-base management: upload, list, inspect, reindex, delete."""
+from app.api.serialization import iso_utc
 from fastapi import (
     APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status,
 )
@@ -40,7 +41,7 @@ class DocumentOut(BaseModel):
             status=row.status.value, chunk_count=row.chunk_count,
             suspicious_chunk_count=row.suspicious_chunk_count,
             error_message=row.error_message,
-            uploaded_at=row.uploaded_at.isoformat(),
+            uploaded_at=iso_utc(row.uploaded_at),
             uploaded_by_admin_id=row.uploaded_by_admin_id,
         )
 
@@ -52,6 +53,34 @@ class ChunkOut(BaseModel):
     char_count: int
     is_suspicious: bool
     text: str
+
+
+CHUNK_BYTES = 64 * 1024
+
+
+async def _read_limited(file: UploadFile) -> bytes:
+    """Read an upload in chunks, aborting as soon as the limit is passed.
+
+    The obvious version -- `await file.read()` then check len() -- buffers
+    the entire body into memory first, so a multi-gigabyte upload is a
+    denial of service that returns 413 only after the damage is done.
+    Reading incrementally bounds memory at the limit plus one chunk.
+    """
+    buffer = bytearray()
+    while True:
+        chunk = await file.read(CHUNK_BYTES)
+        if not chunk:
+            break
+        buffer.extend(chunk)
+        if len(buffer) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"File exceeds the "
+                    f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
+                ),
+            )
+    return bytes(buffer)
 
 
 def _get_or_404(db: Session, document_id: int) -> Document:
@@ -68,12 +97,7 @@ async def upload(
     db: Session = Depends(get_db),
     admin: AdminUser = Depends(require_admin),
 ) -> DocumentOut:
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
-        )
+    data = await _read_limited(file)
 
     rag = get_rag()
     try:

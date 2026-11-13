@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import event
 from sqlalchemy.orm import Session
 
+from app.governance.redaction import redact_params
 from app.models import AuditLog
 from app.models.enums import (
     ApprovalStatus, AuditEventType, Outcome, PermissionResult, RiskLevel,
@@ -46,7 +47,9 @@ def write_audit(
         agent_id=agent_id,
         conversation_id=conversation_id,
         tool_name=tool_name,
-        params_json=json.dumps(params or {}, default=str),
+        # Redacted BEFORE persistence: the append-only trail must not
+        # become a place customer PII accumulates forever.
+        params_json=json.dumps(redact_params(params), default=str),
         risk_level=risk_level,
         permission_result=permission_result,
         approval_status=approval_status,

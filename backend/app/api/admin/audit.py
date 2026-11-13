@@ -1,6 +1,7 @@
 """Read-only audit log access for the dashboard."""
 import json
 
+from app.api.serialization import iso_utc
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -52,7 +53,7 @@ def list_audit_logs(
     return [
         AuditLogOut(
             id=r.id,
-            ts=r.ts.isoformat(),
+            ts=iso_utc(r.ts),
             event_type=r.event_type.value,
             agent_id=r.agent_id,
             admin_user_id=r.admin_user_id,

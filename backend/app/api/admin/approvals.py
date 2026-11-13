@@ -5,6 +5,7 @@ Deciding requires the ADMIN role.
 """
 import json
 
+from app.api.serialization import iso_utc
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -48,11 +49,11 @@ class ActionRequestOut(BaseModel):
             params_hash=row.params_hash,
             risk_level=row.risk_level.value,
             status=row.status.value,
-            requested_at=row.requested_at.isoformat(),
-            decided_at=row.decided_at.isoformat() if row.decided_at else None,
+            requested_at=iso_utc(row.requested_at),
+            decided_at=iso_utc(row.decided_at),
             decided_by_admin_id=row.decided_by_admin_id,
             decision_note=row.decision_note,
-            executed_at=row.executed_at.isoformat() if row.executed_at else None,
+            executed_at=iso_utc(row.executed_at),
             result=json.loads(row.result_json) if row.result_json else None,
             error_message=row.error_message,
         )

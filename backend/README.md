@@ -1,4 +1,4 @@
-# NexaDesk AI — Backend (Milestone 3A)
+# NexaDesk AI — Backend (Milestone 3B)
 
 An AI business concierge with an enterprise agent governance layer.
 
@@ -16,7 +16,10 @@ ingestion, local embeddings, persistent ChromaDB, cited retrieval, the four
 remaining tools, and conversation status so a customer learns the outcome
 of a withheld action.
 
-The React frontend arrives in Milestone 3B.
+**Milestone 3B:** the endpoints the dashboard needs (metrics, agent
+controls, conversations, escalations), write-time PII redaction in the
+audit trail, streaming upload limits, and UTC-explicit timestamps. The
+React application lives in `../frontend`.
 
 ---
 
@@ -182,7 +185,7 @@ The suite runs against in-memory SQLite with a scripted fake LLM: no
 network, no cost, deterministic. The concurrency tests use a temporary
 file-backed database, because threads need to see each other's writes.
 
-**Actual result: 143 passed.**
+**Actual result: 170 passed.**
 
 ### Run the server
 
@@ -345,9 +348,12 @@ These are real. None is hidden behind a passing test.
    `/api/admin/auth/login`.
 6. **No token revocation list.** Deactivating an account is immediate, but
    an individual token lives until expiry.
-7. **`audit_logs.params_json` stores raw parameters** with no redaction —
-   and `book_appointment` parameters contain a customer name and email, so
-   PII is now in the audit trail.
+7. ~~`audit_logs.params_json` stores raw parameters~~ **Fixed in 3B.**
+   Customer names, emails and phone numbers are redacted *before* the row
+   is written (`app/governance/redaction.py`), so the append-only trail
+   never accumulates PII. `action_requests` deliberately keeps the real
+   values — an approved action has to execute with them, and the hash is
+   computed over them.
 8. **No per-document access control.** Every indexed document is reachable
    from every customer conversation.
 9. **Session tokens are unauthenticated bearer tokens.** Unguessable, but
@@ -369,6 +375,8 @@ These are real. None is hidden behind a passing test.
     push notification, and the conversation is not automatically continued
     with the result.
 13. **Ingestion is synchronous** — a large PDF blocks the upload request.
+    Uploads are now read in 64 KB chunks and aborted the moment the 10 MB
+    limit is passed, so an oversized body is no longer buffered whole.
 14. **No OCR**, so scanned PDFs are rejected rather than indexed.
 15. **Business hours are a single UTC schedule** with no per-service
     calendars, holidays or staff resources. Two different services can be
@@ -380,6 +388,7 @@ These are real. None is hidden behind a passing test.
 
 ## Next
 
-Milestone 3B: the React customer chat interface and admin dashboard
-(overview, conversations, knowledge base, permissions, approvals, audit
-logs, agent controls).
+The product is feature-complete across Milestones 1–3B. Remaining work is
+in the limitations list above — chiefly rate limiting, HMAC-keyed parameter
+binding, database-level audit immutability, and moving the session token
+out of `localStorage`.

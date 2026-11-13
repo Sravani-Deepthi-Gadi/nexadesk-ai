@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------
+   Design tokens. One accent, a restrained neutral ramp, and status
+   colours that carry meaning rather than decoration.
+   --------------------------------------------------------------- */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --color-canvas: oklch(0.985 0.002 250);
+  --color-surface: oklch(1 0 0);
+  --color-line: oklch(0.922 0.004 250);
+  --color-line-strong: oklch(0.86 0.006 250);
+
+  --color-ink: oklch(0.22 0.012 265);
+  --color-ink-muted: oklch(0.48 0.012 265);
+  --color-ink-subtle: oklch(0.62 0.01 265);
+
+  --color-accent: oklch(0.52 0.19 272);
+  --color-accent-hover: oklch(0.46 0.19 272);
+  --color-accent-soft: oklch(0.96 0.025 272);
+
+  --color-ok: oklch(0.58 0.14 155);
+  --color-ok-soft: oklch(0.96 0.04 155);
+  --color-warn: oklch(0.70 0.15 75);
+  --color-warn-soft: oklch(0.97 0.05 85);
+  --color-danger: oklch(0.56 0.21 25);
+  --color-danger-soft: oklch(0.96 0.03 25);
+}
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Visible focus for keyboard users on every interactive element. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+@keyframes nd-spin { to { transform: rotate(360deg); } }
+@keyframes nd-fade { from { opacity: 0; transform: translateY(4px); } }
+@keyframes nd-pulse { 50% { opacity: 0.45; } }
+
+.nd-enter { animation: nd-fade 160ms ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

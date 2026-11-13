@@ -1,4 +1,5 @@
 """Customer-facing chat endpoint."""
+from app.api.serialization import iso_utc
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -105,9 +106,9 @@ def _to_status(row: ActionRequest) -> ActionStatusOut:
         tool_name=row.tool_name,
         status=row.status.value,
         risk_level=row.risk_level.value,
-        requested_at=row.requested_at.isoformat(),
-        decided_at=row.decided_at.isoformat() if row.decided_at else None,
-        executed_at=row.executed_at.isoformat() if row.executed_at else None,
+        requested_at=iso_utc(row.requested_at),
+        decided_at=iso_utc(row.decided_at),
+        executed_at=iso_utc(row.executed_at),
         message=_CUSTOMER_WORDING.get(row.status.value, "In progress."),
     )
 

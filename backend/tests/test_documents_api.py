@@ -211,3 +211,53 @@ def test_status_never_leaks_the_admin_decision_note(client, db, admin_user,
     ).json()
     assert "INTERNAL" not in str(body)
     assert body["resolved_actions"][0]["status"] == "rejected"
+
+
+# ==========================================================================
+# Upload size limit (Milestone 3B hardening)
+# ==========================================================================
+def test_oversized_upload_is_rejected_with_413(client, admin_user, db):
+    from app.rag.loader import MAX_UPLOAD_BYTES
+
+    oversized = b"A" * (MAX_UPLOAD_BYTES + 1024)
+    resp = _upload(client, auth(admin_user), oversized, "huge.txt")
+
+    assert resp.status_code == 413
+    assert "limit" in resp.json()["detail"].lower()
+    assert db.query(Document).count() == 0
+
+
+def test_upload_at_the_limit_still_works(client, admin_user):
+    from app.rag.loader import MAX_UPLOAD_BYTES
+
+    body = ("NexaCare policy text. " * 60).encode()
+    body += b"\n" + b"B" * (MAX_UPLOAD_BYTES - len(body) - 2)
+    assert len(body) < MAX_UPLOAD_BYTES
+
+    resp = _upload(client, auth(admin_user), body, "big-but-ok.txt")
+    assert resp.status_code == 201
+
+
+def test_streaming_read_aborts_early(monkeypatch):
+    """The reader must stop consuming once the limit is passed, not buffer
+    the whole body and check afterwards."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.api.admin.documents import CHUNK_BYTES, _read_limited
+    from app.rag.loader import MAX_UPLOAD_BYTES
+
+    consumed = {"bytes": 0}
+
+    class EndlessUpload:
+        async def read(self, size: int = -1) -> bytes:
+            consumed["bytes"] += CHUNK_BYTES
+            return b"A" * CHUNK_BYTES
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_read_limited(EndlessUpload()))
+    assert exc.value.status_code == 413
+
+    # Bounded at the limit plus roughly one chunk, not unbounded.
+    assert consumed["bytes"] <= MAX_UPLOAD_BYTES + (2 * CHUNK_BYTES)
