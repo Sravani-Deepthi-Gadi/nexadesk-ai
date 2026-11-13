@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Secrets - never commit
+.env
+
+# Local data: database, vector index, uploads
+backend/data/*.db
+backend/data/chroma/
+backend/data/uploads/
+
+# Node
+node_modules/
+dist/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
