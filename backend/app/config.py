@@ -27,6 +27,16 @@ class Settings(BaseSettings):
     # --- Agent loop safety ---
     max_tool_iterations: int = 5
 
+    # --- RAG ---
+    #: "sentence-transformers" (local all-MiniLM-L6-v2) or "hashing"
+    #: (deterministic, offline, lexical -- for tests and air-gapped runs).
+    embedding_provider: str = "sentence-transformers"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    vector_store: str = "chroma"
+    chroma_path: str = "./data/chroma"
+    upload_dir: str = "./data/uploads"
+    rag_top_k: int = 4
+
     # --- Auth ---
     jwt_secret: str = ""
     jwt_expire_minutes: int = 60

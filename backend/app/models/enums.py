@@ -14,6 +14,8 @@ class Permission(str, enum.Enum):
     CREATE_APPOINTMENT = "CREATE_APPOINTMENT"
     CANCEL_APPOINTMENT = "CANCEL_APPOINTMENT"
     MODIFY_CUSTOMER_DATA = "MODIFY_CUSTOMER_DATA"
+    # Milestone 3A: opening a staff ticket is an action, so it needs a grant.
+    ESCALATE_TO_HUMAN = "ESCALATE_TO_HUMAN"
 
 
 class RiskLevel(str, enum.Enum):
@@ -103,3 +105,14 @@ class ActionRequestStatus(str, enum.Enum):
 class AdminRole(str, enum.Enum):
     ADMIN = "admin"      # may approve and reject
     VIEWER = "viewer"    # read-only
+
+
+class DocumentStatus(str, enum.Enum):
+    PENDING = "pending"
+    INDEXED = "indexed"
+    FAILED = "failed"
+
+
+class EscalationStatus(str, enum.Enum):
+    OPEN = "open"
+    RESOLVED = "resolved"

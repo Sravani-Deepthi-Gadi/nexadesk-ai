@@ -1,4 +1,4 @@
-# NexaDesk AI — Backend (Milestone 2, final)
+# NexaDesk AI — Backend (Milestone 3A)
 
 An AI business concierge with an enterprise agent governance layer.
 
@@ -11,8 +11,12 @@ reviewable records, an authenticated human rules on them, and only then
 does anything run. Plus JWT auth, role-based authorisation, and an audit
 trail that covers decisions as well as invocations.
 
-RAG, the remaining tools and the React frontend arrive in later
-milestones.
+**Milestone 3A:** the knowledge base and the full tool set — PDF/TXT
+ingestion, local embeddings, persistent ChromaDB, cited retrieval, the four
+remaining tools, and conversation status so a customer learns the outcome
+of a withheld action.
+
+The React frontend arrives in Milestone 3B.
 
 ---
 
@@ -178,7 +182,7 @@ The suite runs against in-memory SQLite with a scripted fake LLM: no
 network, no cost, deterministic. The concurrency tests use a temporary
 file-backed database, because threads need to see each other's writes.
 
-**Actual result: 72 passed.**
+**Actual result: 143 passed.**
 
 ### Run the server
 
@@ -190,6 +194,7 @@ uvicorn app.main:app --reload
 - Interactive API docs: http://127.0.0.1:8000/docs
 - Full API reference: [`docs/API.md`](docs/API.md)
 - Execution guarantees and crash recovery: [`docs/RECOVERY.md`](docs/RECOVERY.md)
+- Knowledge base and untrusted content: [`docs/RAG.md`](docs/RAG.md)
 
 ```powershell
 # Try a real turn (requires ANTHROPIC_API_KEY)
@@ -205,11 +210,36 @@ continue the same conversation.
 
 ## Seeded state
 
-The concierge agent is granted `READ_BUSINESS_DATA`, `CHECK_AVAILABILITY`
-and `CREATE_APPOINTMENT`.
+The concierge agent is granted `READ_BUSINESS_DATA`,
+`READ_CUSTOMER_DATA`, `CHECK_AVAILABILITY`, `CREATE_APPOINTMENT` and
+`ESCALATE_TO_HUMAN`. Business hours are Monday–Friday, 09:00–17:00 UTC.
 
 Note what is **absent**: `CANCEL_APPOINTMENT` and `MODIFY_CUSTOMER_DATA`.
 That absence is what the headline test exercises.
+
+### Tools
+
+| Tool | Permission | Risk | Approval |
+|---|---|---|---|
+| `search_services` | READ_BUSINESS_DATA | LOW | no |
+| `search_knowledge_base` | READ_BUSINESS_DATA | LOW | no |
+| `check_availability` | CHECK_AVAILABILITY | LOW | no |
+| `book_appointment` | CREATE_APPOINTMENT | MEDIUM | no |
+| `get_customer_details` | READ_CUSTOMER_DATA | MEDIUM | no |
+| `escalate_to_human` | ESCALATE_TO_HUMAN | LOW | no |
+| `cancel_appointment` | CANCEL_APPOINTMENT | HIGH | **yes** |
+
+### Verify the real embedding model
+
+The test suite runs on an offline lexical embedding provider so it never
+needs a model download. Confirm the real one works on your machine:
+
+```powershell
+python -m scripts.verify_embeddings
+```
+
+First run downloads ~90 MB. It should report that each paraphrased
+question retrieves the passage answering it.
 
 ## What the tests prove
 
@@ -289,58 +319,67 @@ Eight threads, one request, a real file-backed database:
 
 ## Honest limitations
 
-These are real. None of them is hidden behind a passing test.
+These are real. None is hidden behind a passing test.
+
+**Verification gaps**
+
+1. **Semantic retrieval quality is not verified in CI.** The sandbox this
+   was built in blocks `huggingface.co`, so all-MiniLM-L6-v2 could not be
+   downloaded. The suite runs on `HashingEmbeddings`, which is **lexical,
+   not semantic**: it proves the pipeline, ranking, citations and isolation,
+   not paraphrase quality. Run `python -m scripts.verify_embeddings` locally.
+   ChromaDB persistence *is* verified — `tests/test_chroma_persistence.py`
+   uses the real store.
 
 **Security**
 
-1. **`params_hash` does not stop an attacker with database write access.**
-   It catches a `params_json` edited in isolation, which is the realistic
-   bug and the realistic insider mistake. Someone who rewrites both
-   `params_json` and `params_hash` defeats it. A real fix is an HMAC with a
-   server-side key the database does not hold, or signing the approval
-   itself. Worth saying out loud rather than overclaiming.
-2. **Audit append-only is enforced in the ORM, not the database.** A raw
-   `UPDATE audit_logs` from `sqlite3` or `psql` succeeds. Production wants
-   a `BEFORE UPDATE` trigger, a revoked UPDATE grant, or append-only
-   storage.
-3. **No token revocation list.** Deactivating an account works immediately
-   because the user row is re-read on every request, but an individual
-   token cannot be revoked before expiry. Short expiry is the mitigation.
-4. **No rate limiting** on `/api/chat` or `/api/admin/auth/login`. An open
-   endpoint calling a paid API is a billing incident waiting to happen, and
-   an unthrottled login is a password-guessing surface.
-5. **No CSRF protection**, which is fine for bearer-token clients but would
-   not be if tokens ever move to cookies.
-6. **`audit_logs.params_json` stores raw parameters** with no redaction. The
-   moment a tool handles PII, that PII lands in the audit trail.
-7. **Session tokens are unauthenticated bearer tokens.** 32 bytes of
-   `secrets.token_urlsafe` is unguessable, but anyone holding one owns that
-   conversation.
+2. **Prompt-injection filtering is a mitigation, not a control.** Pattern
+   matching will miss novel phrasing and non-English payloads. The control
+   is the governance engine; see [`docs/RAG.md`](docs/RAG.md).
+3. **`params_hash` does not stop an attacker with database write access.**
+   A real fix is an HMAC keyed with a secret the database does not hold.
+4. **Audit append-only is enforced in the ORM, not the database.** A raw
+   `UPDATE audit_logs` from `sqlite3` succeeds. Production wants a trigger
+   or a revoked UPDATE grant.
+5. **No rate limiting** on `/api/chat`, `/api/chat/status` or
+   `/api/admin/auth/login`.
+6. **No token revocation list.** Deactivating an account is immediate, but
+   an individual token lives until expiry.
+7. **`audit_logs.params_json` stores raw parameters** with no redaction —
+   and `book_appointment` parameters contain a customer name and email, so
+   PII is now in the audit trail.
+8. **No per-document access control.** Every indexed document is reachable
+   from every customer conversation.
+9. **Session tokens are unauthenticated bearer tokens.** Unguessable, but
+   whoever holds one owns that conversation.
+
+**Execution**
+
+10. **Execution is at-most-once, not exactly-once.** A crash between the
+    business commit and the audit write leaves an executed action with no
+    `EXECUTION` audit row — detected and reported, never fabricated. See
+    [`docs/RECOVERY.md`](docs/RECOVERY.md).
+11. **Recovery assumes tools have no side effects outside the
+    transaction.** True today; false the moment a tool calls an external
+    booking API.
 
 **Functional**
 
-8. **Execution is at-most-once, not exactly-once.** A crash between the
-   business commit and the audit write leaves an executed action with no
-   `EXECUTION` audit row. It is detected and reported, never fabricated.
-   Full detail and the assumptions involved: [`docs/RECOVERY.md`](docs/RECOVERY.md).
-9. **Recovery assumes tools have no side effects outside the transaction.**
-   True today. False the moment a tool calls an external booking API, and
-   at that point `app/governance/recovery.py` must change before the tool
-   ships.
-10. **The customer is not notified when their action is approved.** The
-   conversation returns to `active`, but there is no push or polling
-   endpoint yet, so the customer has to send another message to learn the
-   outcome.
-11. **Pending requests never expire.** A request approved three weeks late
-   still executes, subject to the re-checks. A TTL and an `EXPIRED` status
-   belong in the state machine.
-12. **Risk levels are static per tool.** Cancelling a £10 appointment and a
-    £10,000 one are both HIGH. Real systems score risk on parameters too.
-13. **Single agent identity.** The schema supports many; the app seeds one.
-14. **Context trimming is by message count, not token budget.**
+12. **Customers learn outcomes by polling** `/api/chat/status`. There is no
+    push notification, and the conversation is not automatically continued
+    with the result.
+13. **Ingestion is synchronous** — a large PDF blocks the upload request.
+14. **No OCR**, so scanned PDFs are rejected rather than indexed.
+15. **Business hours are a single UTC schedule** with no per-service
+    calendars, holidays or staff resources. Two different services can be
+    booked into the same slot only if the clock allows it; there is no
+    notion of *who* delivers them.
+16. **Pending requests never expire**, and risk levels are static per tool
+    rather than scored on parameters.
+17. **Context trimming is by message count, not token budget.**
 
 ## Next
 
-Milestone 3: RAG over uploaded documents, the remaining tools
-(`check_availability`, `book_appointment`, `get_customer_details`,
-`escalate_to_human`), and the React admin dashboard.
+Milestone 3B: the React customer chat interface and admin dashboard
+(overview, conversations, knowledge base, permissions, approvals, audit
+logs, agent controls).

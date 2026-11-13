@@ -10,11 +10,20 @@ from typing import Any
 
 from app.schemas.tool_catalog import TOOL_CATALOG, ToolDefinition
 from app.tools.appointments import cancel_appointment
+from app.tools.customers import get_customer_details
+from app.tools.escalation import escalate_to_human
+from app.tools.knowledge import search_knowledge_base
+from app.tools.scheduling import book_appointment, check_availability
 from app.tools.services import search_services
 
 #: name -> implementation. Every catalog entry must appear here.
 _IMPLEMENTATIONS: dict[str, Callable[..., dict[str, Any]]] = {
     "search_services": search_services,
+    "search_knowledge_base": search_knowledge_base,
+    "check_availability": check_availability,
+    "book_appointment": book_appointment,
+    "get_customer_details": get_customer_details,
+    "escalate_to_human": escalate_to_human,
     "cancel_appointment": cancel_appointment,
 }
 

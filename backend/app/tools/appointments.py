@@ -14,18 +14,18 @@ tests/test_import_boundary.py fails the build if a tool calls commit().
 """
 from datetime import datetime, timezone
 
-from sqlalchemy.orm import Session
-
 from app.models import Appointment
 from app.models.enums import AppointmentStatus
 from app.schemas.tool_params import CancelAppointmentParams
+from app.tools.context import ToolContext
 
 
 class ToolExecutionError(Exception):
     """Raised when a tool cannot complete for a legitimate domain reason."""
 
 
-def cancel_appointment(db: Session, params: CancelAppointmentParams) -> dict:
+def cancel_appointment(ctx: ToolContext, params: CancelAppointmentParams) -> dict:
+    db = ctx.db
     appt = db.get(Appointment, params.appointment_id)
     if appt is None:
         raise ToolExecutionError(f"No appointment with id {params.appointment_id}.")

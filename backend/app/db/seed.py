@@ -5,7 +5,7 @@ deploy with an ephemeral filesystem reproducible.
 """
 from sqlalchemy.orm import Session
 
-from app.models import Agent, AgentPermission, Service
+from app.models import Agent, AgentPermission, BusinessHours, Service
 from app.models.enums import AgentStatus, Permission
 
 SERVICES = [
@@ -19,9 +19,14 @@ SERVICES = [
 # Note what is absent: CANCEL_APPOINTMENT and MODIFY_CUSTOMER_DATA.
 DEFAULT_AGENT_PERMISSIONS = [
     Permission.READ_BUSINESS_DATA,
+    Permission.READ_CUSTOMER_DATA,
     Permission.CHECK_AVAILABILITY,
     Permission.CREATE_APPOINTMENT,
+    Permission.ESCALATE_TO_HUMAN,
 ]
+
+#: Monday-Friday, 09:00-17:00 UTC. Minutes from midnight.
+DEFAULT_BUSINESS_HOURS = [(wd, 9 * 60, 17 * 60) for wd in range(0, 5)]
 
 
 def seed(db: Session, agent_name: str = "nexadesk-concierge") -> Agent:
@@ -30,6 +35,13 @@ def seed(db: Session, agent_name: str = "nexadesk-concierge") -> Agent:
             db.add(Service(
                 name=name, description=desc,
                 duration_minutes=minutes, price_cents=price, is_active=True,
+            ))
+
+    if db.query(BusinessHours).count() == 0:
+        for weekday, open_minute, close_minute in DEFAULT_BUSINESS_HOURS:
+            db.add(BusinessHours(
+                weekday=weekday, open_minute=open_minute,
+                close_minute=close_minute, is_open=True,
             ))
 
     agent = db.query(Agent).filter(Agent.name == agent_name).one_or_none()

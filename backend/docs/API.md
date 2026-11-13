@@ -169,3 +169,99 @@ high-risk action — three rows, in order.
 
 Audit rows are append-only. There is no update or delete endpoint, and the
 ORM rejects both.
+
+---
+
+# Milestone 3A additions
+
+## Customer
+
+### `GET /api/chat/status?session_token=…`
+
+Lets a customer poll for the outcome of a withheld action. Scoped by
+session token alone — there is no conversation id parameter, so one
+customer cannot read another's approvals.
+
+```json
+{
+  "session_token": "T4bX...",
+  "conversation_id": 1,
+  "state": "awaiting_approval",
+  "pending_actions": [
+    {
+      "action_request_id": 1,
+      "tool_name": "cancel_appointment",
+      "status": "pending",
+      "risk_level": "HIGH",
+      "requested_at": "2026-11-12T08:10:00+00:00",
+      "decided_at": null,
+      "executed_at": null,
+      "message": "Waiting for a member of staff to review this."
+    }
+  ],
+  "resolved_actions": []
+}
+```
+
+`state` is `active`, `awaiting_approval`, `escalated` or `closed`.
+`message` is customer-facing wording. The administrator's internal
+`decision_note` is deliberately **not** returned.
+
+404 if the session token is unknown.
+
+## Admin — documents
+
+Upload and destructive operations require the **ADMIN** role; reading is
+open to **VIEWER** as well.
+
+### `POST /api/admin/documents`
+`multipart/form-data` with `file` and optional `title`.
+Accepts PDF, `.txt` and `.md`, up to 10 MB.
+
+| Code | Meaning |
+|---|---|
+| 201 | Indexed |
+| 409 | Identical file already indexed (matched by SHA-256) |
+| 415 | Unsupported file type |
+| 422 | No extractable text (e.g. a scanned PDF needing OCR) |
+| 413 | Over the size limit |
+
+```json
+{
+  "id": 1, "filename": "policies.pdf", "title": "Company Policies",
+  "content_type": "application/pdf", "size_bytes": 48120,
+  "status": "indexed", "chunk_count": 12,
+  "suspicious_chunk_count": 1, "error_message": null,
+  "uploaded_at": "2026-11-12T08:00:00+00:00", "uploaded_by_admin_id": 1
+}
+```
+
+`suspicious_chunk_count` is how many passages tripped the prompt-injection
+heuristics. It is a prompt for human review, not a security control.
+
+### `GET /api/admin/documents?status=`
+### `GET /api/admin/documents/{id}`
+### `GET /api/admin/documents/{id}/chunks?suspicious_only=true`
+
+Shows exactly what was indexed, in its **original** form — neutralisation
+happens at retrieval, so an administrator reads back what was uploaded.
+
+### `POST /api/admin/documents/{id}/reindex`
+Rebuilds this document's vectors from the chunk text in SQLite. Use after a
+host wipes the vector store; nothing needs re-uploading.
+
+### `DELETE /api/admin/documents/{id}`
+204. Removes the document, its chunks and its vectors.
+
+## New tools
+
+| Tool | Permission | Risk | Approval |
+|---|---|---|---|
+| `search_knowledge_base` | READ_BUSINESS_DATA | LOW | no |
+| `check_availability` | CHECK_AVAILABILITY | LOW | no |
+| `book_appointment` | CREATE_APPOINTMENT | MEDIUM | no |
+| `get_customer_details` | READ_CUSTOMER_DATA | MEDIUM | no |
+| `escalate_to_human` | ESCALATE_TO_HUMAN | LOW | no |
+
+`get_customer_details` takes no parameters by design — see
+[`docs/RAG.md`](RAG.md#customer-data-isolation).

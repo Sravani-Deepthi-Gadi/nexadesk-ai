@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import chat
 from app.api.admin import approvals as admin_approvals
 from app.api.admin import audit as admin_audit
+from app.api.admin import documents as admin_documents
 from app.api.admin import auth as admin_auth
 from app.config import get_settings
 from app.db.seed import seed, seed_admin
@@ -59,6 +60,7 @@ app.include_router(chat.router)
 app.include_router(admin_auth.router)
 app.include_router(admin_approvals.router)
 app.include_router(admin_audit.router)
+app.include_router(admin_documents.router)
 
 
 @app.get("/api/health")

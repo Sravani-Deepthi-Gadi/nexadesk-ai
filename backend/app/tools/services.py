@@ -1,12 +1,14 @@
-"""Implementation of search_services. Touches the database."""
-from sqlalchemy.orm import Session
+"""Implementation of search_services. Touches the database.
 
+TRANSACTION CONTRACT: tools never commit (see app/tools/appointments.py).
+"""
 from app.models import Service
 from app.schemas.tool_params import SearchServicesParams
+from app.tools.context import ToolContext
 
 
-def search_services(db: Session, params: SearchServicesParams) -> dict:
-    stmt = db.query(Service).filter(Service.is_active.is_(True))
+def search_services(ctx: ToolContext, params: SearchServicesParams) -> dict:
+    stmt = ctx.db.query(Service).filter(Service.is_active.is_(True))
     if params.query:
         like = f"%{params.query.lower()}%"
         stmt = stmt.filter(

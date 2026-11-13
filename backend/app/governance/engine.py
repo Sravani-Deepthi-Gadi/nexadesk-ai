@@ -37,6 +37,7 @@ from app.models.enums import (
     ApprovalStatus, AuditEventType, Outcome, PermissionResult, RiskLevel,
 )
 from app.tools.appointments import ToolExecutionError
+from app.tools.context import ToolContext
 from app.tools.registry import get_tool
 
 
@@ -75,6 +76,22 @@ class GovernanceEngine:
         self.db = db
         self.agent_id = agent_id
         self.conversation_id = conversation_id
+
+    def _context(self, conversation_id: int | None = None) -> ToolContext:
+        """Build the execution context handed to a tool.
+
+        The conversation is supplied by the ENGINE, never by the model.
+        That is what makes customer isolation structural: a tool can only
+        ever see the conversation it is actually running inside.
+        """
+        return ToolContext(
+            db=self.db,
+            agent_id=self.agent_id,
+            conversation_id=(
+                conversation_id if conversation_id is not None
+                else self.conversation_id
+            ),
+        )
 
     def _audit(self, **kwargs) -> int:
         entry = write_audit(
@@ -191,7 +208,7 @@ class GovernanceEngine:
 
         # --- 6. Execute ---------------------------------------------------
         try:
-            data = spec.impl(self.db, params)
+            data = spec.impl(self._context(), params)
         except ToolExecutionError as exc:
             # The implementation may have mutated objects before failing.
             # Roll back first, or the audit write's commit would persist
@@ -338,7 +355,11 @@ class GovernanceEngine:
         # See docs/RECOVERY.md.
         try:
             params = spec.params_model.model_validate(raw_params)
-            data = spec.impl(self.db, params)
+            # The context comes from the REQUEST, not from this engine
+            # instance: an approval executed later must run inside the
+            # conversation it was raised in, or customer-scoped tools would
+            # resolve the wrong customer.
+            data = spec.impl(self._context(request.conversation_id), params)
             mark_executed(self.db, request.id, data, commit=False)
             self.db.commit()
         except (ToolExecutionError, ValidationError) as exc:
