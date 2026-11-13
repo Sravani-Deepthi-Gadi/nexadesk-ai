@@ -31,10 +31,14 @@ def test_tool_backed_answer_round_trip(db, agent):
     body = resp.json()
 
     assert "consultations" in body["reply"]
-    assert body["tool_calls"] == [{
-        "tool": "search_services", "outcome": "executed",
-        "risk_level": "LOW", "audit_log_id": body["tool_calls"][0]["audit_log_id"],
-    }]
+    assert len(body["tool_calls"]) == 1
+    call = body["tool_calls"][0]
+    assert call["tool"] == "search_services"
+    assert call["outcome"] == "executed"
+    assert call["risk_level"] == "LOW"
+    assert call["audit_log_id"] is not None
+    # A LOW-risk call needs no approval, so it has no action request.
+    assert call["action_request_id"] is None
 
     # The second call to the model must have carried the tool result back.
     second_call_messages = llm.calls[1]["messages"]

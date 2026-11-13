@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # --- Agent loop safety ---
     max_tool_iterations: int = 5
 
+    # --- Auth ---
+    jwt_secret: str = ""
+    jwt_expire_minutes: int = 60
+    #: Optional bootstrap admin. If either is blank, no admin is seeded and
+    #: you create one with: python -m scripts.create_admin
+    admin_email: str = ""
+    admin_password: str = ""
+
     # --- CORS ---
     cors_origins: str = "http://localhost:5173"
 

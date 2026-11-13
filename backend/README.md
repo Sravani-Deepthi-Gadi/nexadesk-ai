@@ -1,14 +1,18 @@
-# NexaDesk AI — Backend (Milestone 1)
+# NexaDesk AI — Backend (Milestone 2)
 
 An AI business concierge with an enterprise agent governance layer.
 
-**Milestone 1 scope:** the vertical slice. One customer message travels all
-the way from the API, through the agent loop, through the governance engine,
-into a tool, and out to an audit log — and is correctly refused when it
-should be.
+**Milestone 1:** the vertical slice — a message travels from the API,
+through the agent loop, through the governance engine, into a tool, and out
+to an audit log; and is correctly refused when it should be.
 
-RAG, the approval queue UI, the remaining tools and the React frontend
-arrive in later milestones.
+**Milestone 2:** the human approval workflow — withheld actions become
+reviewable records, an authenticated human rules on them, and only then
+does anything run. Plus JWT auth, role-based authorisation, and an audit
+trail that covers decisions as well as invocations.
+
+RAG, the remaining tools and the React frontend arrive in later
+milestones.
 
 ---
 
@@ -27,9 +31,16 @@ This is enforced structurally, not by convention:
 | `app/tools/` | — | Real functions that touch the database. |
 
 `tests/test_import_boundary.py` parses every module under `app/agent/` with
-Python's `ast` module and fails the build if any of them imports `app.tools`.
+Python's `ast` module and fails the build if any of them imports
+`app.tools`, `app.governance.approvals` or `app.governance.action_requests`.
 A permission check the agent could skip by importing a function directly
 would be theatre.
+
+A second test closes the back door: `app/governance/engine.py` must not
+import the approval service either. The engine may *create* an action
+request; it may never *decide* on one. Without that check the agent would
+acquire a transitive path to approving its own actions through a module it
+is allowed to import.
 
 Permissions live in the **database**, keyed to `agent_id` — never in the
 prompt. Anything in a prompt is negotiable; anything in a `WHERE` clause is
@@ -49,6 +60,47 @@ not.
 Every path writes exactly one audit row, **including every rejection**.
 `audit_logs` is append-only, enforced by a SQLAlchemy `before_flush` listener.
 
+## The approval workflow (Milestone 2)
+
+```
+PENDING ──approve──> APPROVED ──claim──> EXECUTING ──> EXECUTED
+   │                                          └──────> FAILED
+   └──reject──> REJECTED        (terminal: no execution path exists)
+```
+
+Four properties hold, and each has a test that fails without it:
+
+**1. An approval is bound to exact parameters.** Parameters are stored
+canonically (sorted keys, no incidental whitespace) with
+`params_hash = sha256(tool_name + canonical_params)`. The approve and
+reject endpoints *require* the client to send back the hash it displayed; a
+mismatch is a 409. The executor re-derives the hash from storage and
+compares again before running. An administrator approves one specific
+action, not "whatever is in that row by the time it executes."
+
+**2. Decisions and executions happen at most once.** Every transition is an
+atomic conditional UPDATE:
+
+```sql
+UPDATE action_requests SET status = 'approved' WHERE id = ? AND status = 'pending'
+```
+
+followed by a `rowcount == 1` check. A read-then-write here would be a
+TOCTOU race. `tests/test_concurrency.py` fires eight threads at the same
+request against a file-backed database and asserts exactly one wins —
+swapping in the naive implementation makes all eight succeed and the
+appointment gets cancelled eight times.
+
+**3. Approval is not a bypass of governance.** Minutes may pass between a
+decision and execution, so `execute_approved()` re-checks the emergency
+stop and re-checks the agent's permission. An agent disabled after approval
+does not get to act.
+
+**4. The LLM cannot approve its own actions.** `decided_by_admin_id` is a
+foreign key to `admin_users`, set only behind JWT plus a role check, and
+the import boundary above means no module the agent can reach even contains
+the approval code.
+
 ---
 
 ## Setup (Windows PowerShell)
@@ -65,8 +117,39 @@ pip install -r requirements.txt
 
 # Configure secrets
 Copy-Item .env.example .env
-notepad .env        # paste your ANTHROPIC_API_KEY
+notepad .env        # paste your ANTHROPIC_API_KEY and a JWT_SECRET
 ```
+
+Generate a JWT secret:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+The app refuses to issue or verify tokens if `JWT_SECRET` is unset or left
+as a placeholder — failing loudly beats signing tokens with a default
+everyone knows.
+
+### Database migrations
+
+```powershell
+alembic upgrade head          # create or update the schema
+alembic downgrade base        # tear it back down (development only)
+```
+
+Alembic reads `DATABASE_URL` from your `.env` via `alembic/env.py`; no
+connection string is committed. `render_as_batch` is on because SQLite
+cannot `ALTER` most columns in place.
+
+### Create an administrator
+
+```powershell
+python -m scripts.create_admin
+```
+
+Or set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env` to have one seeded at
+startup. No credentials are hardcoded anywhere; with both unset, no admin
+is created.
 
 > **An Anthropic (Claude.ai) subscription is not API access.** You need
 > prepaid credits at `console.anthropic.com`. $5 covers all of development
@@ -80,7 +163,10 @@ python -m pytest -q
 ```
 
 The suite runs against in-memory SQLite with a scripted fake LLM: no
-network, no cost, deterministic.
+network, no cost, deterministic. The concurrency tests use a temporary
+file-backed database, because threads need to see each other's writes.
+
+**Actual result: 48 passed.**
 
 ### Run the server
 
@@ -90,6 +176,7 @@ uvicorn app.main:app --reload
 
 - Health check: http://127.0.0.1:8000/api/health
 - Interactive API docs: http://127.0.0.1:8000/docs
+- Full API reference: [`docs/API.md`](docs/API.md)
 
 ```powershell
 # Try a real turn (requires ANTHROPIC_API_KEY)
@@ -113,6 +200,8 @@ That absence is what the headline test exercises.
 
 ## What the tests prove
 
+### Milestone 1 — governance
+
 | Test | Claim |
 |---|---|
 | `test_permitted_low_risk_tool_executes_and_is_audited` | Happy path works and is logged |
@@ -123,16 +212,90 @@ That absence is what the headline test exercises.
 | `test_invalid_parameters_are_rejected_before_execution` | Bad params never reach the implementation |
 | `test_audit_rows_cannot_be_modified` | The audit trail has no UPDATE path |
 | `test_agent_package_never_imports_tool_implementations` | The boundary is real |
+| `test_agent_cannot_reach_approvals_transitively` | No back door through the engine |
 | `test_sessions_are_isolated` | One customer cannot read another's history |
-| `test_blocked_tool_is_reported_to_the_model_not_executed` | The model is told, and still cannot act |
 
-## Known gaps (deliberate, not forgotten)
+### Milestone 2 — approvals and auth
 
-- **Approval queue** — HIGH-risk actions are blocked and audited as
-  `pending_approval`, but there is no `action_requests` row or admin
-  endpoint yet. Milestone 2.
-- **Admin authentication** — no auth on admin routes yet, because there are
-  no admin routes yet. Milestone 2 adds JWT + role checks before the first
-  one ships.
-- **RAG** — Milestone 3.
-- **Context trimming** is by message count, not token budget.
+| Test | Claim |
+|---|---|
+| `test_high_risk_action_creates_pending_request` | A withheld action becomes a reviewable record |
+| `test_approval_executes_the_action` | Approval actually cancels the appointment |
+| `test_rejection_never_executes` | Rejected actions leave the data untouched |
+| `test_rejected_request_cannot_be_executed_afterwards` | REJECTED is terminal even via internal misuse |
+| `test_approval_with_stale_params_hash_is_refused` | You cannot approve parameters you were not shown |
+| `test_params_tampered_after_approval_are_not_executed` | Editing `params_json` post-approval blocks execution |
+| `test_duplicate_approval_is_refused` | Second decision gets 409 |
+| `test_duplicate_execution_is_impossible` | The action runs exactly once |
+| `test_emergency_stop_after_approval_blocks_execution` | Approval is not immunity from the kill switch |
+| `test_permission_revoked_after_approval_blocks_execution` | Permissions are re-checked at execution time |
+| `test_no_token_is_rejected` / `test_malformed_tokens_are_rejected` | 401 on absent or junk credentials |
+| `test_token_signed_with_another_secret_is_rejected` | Forged tokens fail |
+| `test_expired_token_is_rejected` | Expiry is enforced |
+| `test_viewer_may_read_but_not_decide` | Role gate works |
+| `test_role_escalation_in_token_is_ignored` | A token claiming `admin` does not make you one |
+| `test_deactivated_admin_token_stops_working` | Revocation is immediate, not at expiry |
+| `test_login_does_not_reveal_whether_an_email_exists` | No account enumeration |
+| `test_full_lifecycle_produces_three_linked_audit_rows` | Invocation → decision → execution, all linked |
+
+### Concurrency (`tests/test_concurrency.py`)
+
+Eight threads, one request, a real file-backed database:
+
+| Test | Claim |
+|---|---|
+| `test_concurrent_approvals_only_one_wins` | Exactly one approval succeeds |
+| `test_concurrent_approve_and_reject_only_one_decision_sticks` | Approve/reject races resolve to one decision |
+| `test_concurrent_execution_runs_the_action_exactly_once` | The appointment is cancelled once, not eight times |
+
+---
+
+## Honest limitations
+
+These are real. None of them is hidden behind a passing test.
+
+**Security**
+
+1. **`params_hash` does not stop an attacker with database write access.**
+   It catches a `params_json` edited in isolation, which is the realistic
+   bug and the realistic insider mistake. Someone who rewrites both
+   `params_json` and `params_hash` defeats it. A real fix is an HMAC with a
+   server-side key the database does not hold, or signing the approval
+   itself. Worth saying out loud rather than overclaiming.
+2. **Audit append-only is enforced in the ORM, not the database.** A raw
+   `UPDATE audit_logs` from `sqlite3` or `psql` succeeds. Production wants
+   a `BEFORE UPDATE` trigger, a revoked UPDATE grant, or append-only
+   storage.
+3. **No token revocation list.** Deactivating an account works immediately
+   because the user row is re-read on every request, but an individual
+   token cannot be revoked before expiry. Short expiry is the mitigation.
+4. **No rate limiting** on `/api/chat` or `/api/admin/auth/login`. An open
+   endpoint calling a paid API is a billing incident waiting to happen, and
+   an unthrottled login is a password-guessing surface.
+5. **No CSRF protection**, which is fine for bearer-token clients but would
+   not be if tokens ever move to cookies.
+6. **`audit_logs.params_json` stores raw parameters** with no redaction. The
+   moment a tool handles PII, that PII lands in the audit trail.
+7. **Session tokens are unauthenticated bearer tokens.** 32 bytes of
+   `secrets.token_urlsafe` is unguessable, but anyone holding one owns that
+   conversation.
+
+**Functional**
+
+8. **The customer is not notified when their action is approved.** The
+   conversation returns to `active`, but there is no push or polling
+   endpoint yet, so the customer has to send another message to learn the
+   outcome.
+9. **Pending requests never expire.** A request approved three weeks late
+   still executes, subject to the re-checks. A TTL and an `EXPIRED` status
+   belong in the state machine.
+10. **Risk levels are static per tool.** Cancelling a £10 appointment and a
+    £10,000 one are both HIGH. Real systems score risk on parameters too.
+11. **Single agent identity.** The schema supports many; the app seeds one.
+12. **Context trimming is by message count, not token budget.**
+
+## Next
+
+Milestone 3: RAG over uploaded documents, the remaining tools
+(`check_availability`, `book_appointment`, `get_customer_details`,
+`escalate_to_human`), and the React admin dashboard.

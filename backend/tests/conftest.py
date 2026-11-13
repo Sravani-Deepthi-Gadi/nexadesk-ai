@@ -3,6 +3,14 @@
 The suite runs against an in-memory SQLite database and a scripted fake LLM.
 No API key, no network, no cost, and the same result every run.
 """
+import os
+
+# Must be set before app.config caches its Settings instance.
+os.environ.setdefault("JWT_SECRET", "test-secret-do-not-use-outside-tests-0123456789")
+os.environ.setdefault("ANTHROPIC_API_KEY", "")
+os.environ.setdefault("ADMIN_EMAIL", "")
+os.environ.setdefault("ADMIN_PASSWORD", "")
+
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,9 +20,17 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.agent.llm.base import LLMResponse
+from app.config import get_settings
 from app.db.seed import seed
-from app.models import Agent, AgentPermission, Appointment, Base, Customer, Service
-from app.models.enums import AppointmentStatus, Permission
+from app.models import (
+    ActionRequest, AdminUser, Agent, AgentPermission, Appointment, Base,
+    Customer, Service,
+)
+from app.models.enums import AdminRole, AppointmentStatus, Permission
+from app.security.password import hash_password
+from app.security.tokens import create_access_token
+
+get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -98,3 +114,66 @@ def tool_use_response(tool_use_id: str, name: str, payload: dict) -> LLMResponse
 
 def text_response(text: str) -> LLMResponse:
     return LLMResponse(stop_reason="end_turn", content=[{"type": "text", "text": text}])
+
+
+# --------------------------------------------------------------------------
+# Milestone 2 fixtures
+# --------------------------------------------------------------------------
+@pytest.fixture
+def admin_user(db) -> AdminUser:
+    user = AdminUser(
+        email="admin@nexacare.co",
+        password_hash=hash_password("correct-horse-battery"),
+        role=AdminRole.ADMIN,
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@pytest.fixture
+def viewer_user(db) -> AdminUser:
+    user = AdminUser(
+        email="viewer@nexacare.co",
+        password_hash=hash_password("read-only-please"),
+        role=AdminRole.VIEWER,
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def token_for(user: AdminUser, *, expires_minutes: int = 60) -> str:
+    settings = get_settings()
+    return create_access_token(
+        subject_id=user.id, email=user.email, role=user.role.value,
+        secret=settings.jwt_secret, expires_minutes=expires_minutes,
+    )
+
+
+def auth(user: AdminUser) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token_for(user)}"}
+
+
+@pytest.fixture
+def pending_request(db, agent, booked_appointment) -> ActionRequest:
+    """A real withheld cancel_appointment request.
+
+    Permission is granted first, so the action is withheld because it is
+    HIGH risk -- not because the agent lacked the permission.
+    """
+    from app.governance.engine import GovernanceEngine
+
+    grant(db, agent, Permission.CANCEL_APPOINTMENT)
+    engine = GovernanceEngine(db, agent_id=agent.id)
+    result = engine.execute(
+        "cancel_appointment",
+        {"appointment_id": booked_appointment.id, "reason": "schedule clash"},
+        tool_use_id="tu_cancel_1",
+    )
+    assert result.action_request_id is not None
+    return db.get(ActionRequest, result.action_request_id)

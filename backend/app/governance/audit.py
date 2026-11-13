@@ -6,7 +6,9 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog
-from app.models.enums import ApprovalStatus, Outcome, PermissionResult, RiskLevel
+from app.models.enums import (
+    ApprovalStatus, AuditEventType, Outcome, PermissionResult, RiskLevel,
+)
 
 
 class AuditImmutabilityError(Exception):
@@ -35,6 +37,9 @@ def write_audit(
     approval_status: ApprovalStatus,
     outcome: Outcome,
     error_message: str | None = None,
+    event_type: AuditEventType = AuditEventType.TOOL_INVOCATION,
+    action_request_id: int | None = None,
+    admin_user_id: int | None = None,
 ) -> AuditLog:
     entry = AuditLog(
         ts=datetime.now(timezone.utc),
@@ -47,6 +52,9 @@ def write_audit(
         approval_status=approval_status,
         outcome=outcome,
         error_message=error_message,
+        event_type=event_type,
+        action_request_id=action_request_id,
+        admin_user_id=admin_user_id,
     )
     db.add(entry)
     db.commit()

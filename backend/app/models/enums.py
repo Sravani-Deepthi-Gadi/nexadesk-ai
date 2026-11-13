@@ -59,8 +59,47 @@ class ApprovalStatus(str, enum.Enum):
 
 
 class Outcome(str, enum.Enum):
-    """Terminal result of one governed tool invocation."""
+    """Result recorded on one audit row."""
     EXECUTED = "executed"
     BLOCKED = "blocked"
     PENDING_APPROVAL = "pending_approval"
     ERROR = "error"
+    # Decision outcomes, recorded on APPROVAL_DECISION rows.
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class AuditEventType(str, enum.Enum):
+    """What kind of event an audit row records.
+
+    A HIGH-risk action produces three rows over its lifetime:
+    TOOL_INVOCATION (agent proposed it), APPROVAL_DECISION (a human ruled
+    on it), EXECUTION (what actually happened). Keeping them distinct means
+    the trail reads as a story rather than a pile of ambiguous rows.
+    """
+    TOOL_INVOCATION = "tool_invocation"
+    APPROVAL_DECISION = "approval_decision"
+    EXECUTION = "execution"
+
+
+class ActionRequestStatus(str, enum.Enum):
+    """Lifecycle of a withheld action.
+
+    PENDING -> APPROVED -> EXECUTING -> EXECUTED | FAILED
+    PENDING -> REJECTED  (terminal: can never execute)
+
+    EXECUTING exists solely so that the APPROVED -> EXECUTING transition can
+    be an atomic conditional UPDATE. Without that intermediate state, two
+    concurrent execute calls could both read APPROVED and both run.
+    """
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXECUTING = "executing"
+    EXECUTED = "executed"
+    FAILED = "failed"
+
+
+class AdminRole(str, enum.Enum):
+    ADMIN = "admin"      # may approve and reject
+    VIEWER = "viewer"    # read-only

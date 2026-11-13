@@ -21,7 +21,7 @@ from app.agent.memory import (
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tool_schemas import build_tool_schemas
 from app.governance.engine import GovernanceEngine
-from app.models.enums import MessageRole, Outcome
+from app.models.enums import ConversationState, MessageRole, Outcome
 
 
 @dataclass
@@ -85,13 +85,22 @@ class AgentOrchestrator:
             for block in response.tool_uses:
                 name = block.get("name", "")
                 raw_input = block.get("input") or {}
-                outcome = governance.execute(name, raw_input)
+                outcome = governance.execute(
+                    name, raw_input, tool_use_id=block.get("id")
+                )
+
+                # A withheld action parks the conversation until a human
+                # rules on it. The approval service releases it again.
+                if outcome.outcome is Outcome.PENDING_APPROVAL:
+                    convo.state = ConversationState.AWAITING_APPROVAL
+                    self.db.commit()
 
                 tool_calls.append({
                     "tool": name,
                     "outcome": outcome.outcome.value,
                     "risk_level": outcome.risk_level.value if outcome.risk_level else None,
                     "audit_log_id": outcome.audit_log_id,
+                    "action_request_id": outcome.action_request_id,
                 })
 
                 result_blocks.append({

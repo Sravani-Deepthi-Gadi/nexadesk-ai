@@ -23,6 +23,7 @@ class ToolCallInfo(BaseModel):
     outcome: str
     risk_level: str | None = None
     audit_log_id: int | None = None
+    action_request_id: int | None = None
 
 
 class ChatResponse(BaseModel):

@@ -19,8 +19,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 from app.models.enums import (
-    AgentStatus, ApprovalStatus, AppointmentStatus, ConversationState,
-    MessageRole, Outcome, Permission, PermissionResult, RiskLevel,
+    ActionRequestStatus, AdminRole, AgentStatus, ApprovalStatus,
+    AppointmentStatus, AuditEventType, ConversationState, MessageRole,
+    Outcome, Permission, PermissionResult, RiskLevel,
 )
 
 
@@ -170,3 +171,85 @@ class AuditLog(Base):
     )
     outcome: Mapped[Outcome] = mapped_column(SAEnum(Outcome), nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)
+
+    # Added in Milestone 2 ------------------------------------------------
+    event_type: Mapped[AuditEventType] = mapped_column(
+        SAEnum(AuditEventType), default=AuditEventType.TOOL_INVOCATION,
+        nullable=False,
+    )
+    #: Links the three rows of one HIGH-risk action's life together.
+    action_request_id: Mapped[int | None] = mapped_column(
+        ForeignKey("action_requests.id")
+    )
+    #: The human who made the decision. Null on agent-initiated rows.
+    admin_user_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"))
+
+
+# --------------------------------------------------------------------------
+# Approval workflow (Milestone 2)
+# --------------------------------------------------------------------------
+class AdminUser(Base):
+    """A human operator. Only these rows can decide on an action request."""
+    __tablename__ = "admin_users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[AdminRole] = mapped_column(
+        SAEnum(AdminRole), default=AdminRole.VIEWER, nullable=False
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ActionRequest(Base):
+    """A HIGH-risk action the agent proposed and the engine withheld.
+
+    ``params_json`` is stored canonically (sorted keys, no whitespace) and
+    ``params_hash`` is sha256 over tool_name + that canonical form. An
+    administrator approves a specific hash, and the executor re-derives and
+    re-compares the hash before running. That is what binds an approval to
+    the exact parameters a human actually saw.
+
+    ``status`` moves only via atomic conditional UPDATEs -- see
+    app/governance/approvals.py. Never read-then-write.
+    """
+    __tablename__ = "action_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id"), nullable=False)
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id"))
+    #: The model's tool_use block id, so a resumed conversation can be matched up.
+    tool_use_id: Mapped[str | None] = mapped_column(String(80))
+
+    tool_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False)
+    params_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_level: Mapped[RiskLevel] = mapped_column(SAEnum(RiskLevel), nullable=False)
+
+    status: Mapped[ActionRequestStatus] = mapped_column(
+        SAEnum(ActionRequestStatus), default=ActionRequestStatus.PENDING,
+        nullable=False, index=True,
+    )
+
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"))
+    decision_note: Mapped[str | None] = mapped_column(Text)
+
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    agent: Mapped["Agent"] = relationship()
+    decided_by: Mapped["AdminUser | None"] = relationship()
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in (
+            ActionRequestStatus.REJECTED,
+            ActionRequestStatus.EXECUTED,
+            ActionRequestStatus.FAILED,
+        )

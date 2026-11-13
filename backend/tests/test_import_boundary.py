@@ -11,7 +11,19 @@ import ast
 import pathlib
 
 AGENT_DIR = pathlib.Path(__file__).resolve().parents[1] / "app" / "agent"
-FORBIDDEN_PREFIX = "app.tools"
+
+#: Modules the agent package may never import.
+#:   app.tools              -- the real implementations
+#:   app.governance.approvals / .action_requests
+#:                          -- the approval machinery. If the agent could
+#:                             reach these it could approve its own
+#:                             high-risk actions, which is the single thing
+#:                             the whole approval workflow exists to prevent.
+FORBIDDEN_PREFIXES = (
+    "app.tools",
+    "app.governance.approvals",
+    "app.governance.action_requests",
+)
 
 
 def _imported_modules(path: pathlib.Path) -> set[str]:
@@ -25,6 +37,13 @@ def _imported_modules(path: pathlib.Path) -> set[str]:
     return found
 
 
+def _violates(module: str) -> bool:
+    return any(
+        module == prefix or module.startswith(prefix + ".")
+        for prefix in FORBIDDEN_PREFIXES
+    )
+
+
 def test_agent_package_never_imports_tool_implementations():
     offenders: list[str] = []
     files = sorted(AGENT_DIR.rglob("*.py"))
@@ -32,12 +51,38 @@ def test_agent_package_never_imports_tool_implementations():
 
     for path in files:
         for module in _imported_modules(path):
-            if module == FORBIDDEN_PREFIX or module.startswith(FORBIDDEN_PREFIX + "."):
+            if _violates(module):
                 offenders.append(f"{path.name} imports {module}")
 
     assert not offenders, (
-        "The agent package must reach tools only via the governance engine. "
+        "The agent package must reach tools only via the governance engine, "
+        "and must have no path at all to the approval machinery. "
         f"Violations: {offenders}"
+    )
+
+
+def test_agent_cannot_reach_approvals_transitively():
+    """The direct-import ban is not enough on its own.
+
+    app.agent.orchestrator imports app.governance.engine, so if the engine
+    ever imported the approval service, the agent would acquire a path to
+    it through the back door. The engine may create an action request; it
+    may never decide on one.
+    """
+    import app.governance.engine as engine_module
+
+    source = pathlib.Path(engine_module.__file__).read_text()
+    tree = ast.parse(source)
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+        elif isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+
+    assert "app.governance.approvals" not in imported, (
+        "The engine must not import the approval service -- that would give "
+        "the agent a transitive path to approving its own actions."
     )
 
 

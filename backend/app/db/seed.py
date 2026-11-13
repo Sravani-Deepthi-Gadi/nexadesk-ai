@@ -43,3 +43,38 @@ def seed(db: Session, agent_name: str = "nexadesk-concierge") -> Agent:
     db.commit()
     db.refresh(agent)
     return agent
+
+
+def seed_admin(db: Session) -> "AdminUser | None":
+    """Create the bootstrap admin from env vars, if both are set.
+
+    No credentials are hardcoded. With ADMIN_EMAIL/ADMIN_PASSWORD unset this
+    is a no-op and you create an operator with scripts/create_admin.py.
+    """
+    from app.config import get_settings
+    from app.models import AdminUser
+    from app.models.enums import AdminRole
+    from app.security.password import hash_password
+
+    settings = get_settings()
+    if not settings.admin_email or not settings.admin_password:
+        return None
+
+    existing = (
+        db.query(AdminUser)
+        .filter(AdminUser.email == settings.admin_email)
+        .one_or_none()
+    )
+    if existing is not None:
+        return existing
+
+    admin = AdminUser(
+        email=settings.admin_email,
+        password_hash=hash_password(settings.admin_password),
+        role=AdminRole.ADMIN,
+        is_active=True,
+    )
+    db.add(admin)
+    db.commit()
+    db.refresh(admin)
+    return admin
