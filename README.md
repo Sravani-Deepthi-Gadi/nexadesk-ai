@@ -26,6 +26,25 @@ appointment.
 
 ## Quick start (Windows PowerShell)
 
+**If you just want it running:**
+
+```powershell
+.\setup.ps1                 # one time: venv, dependencies, .env, migrations, admin
+cd backend; .\.venv\Scripts\Activate.ps1; python -m scripts.seed_demo; cd ..
+.\start.ps1                 # starts both servers and opens the browser
+```
+
+Then see [`DEMO.md`](DEMO.md) for a 5-7 minute walkthrough script.
+
+Everything works without an Anthropic API key **except the chat replying**.
+To enable it, put your key in `backend\.env` as `ANTHROPIC_API_KEY=sk-ant-...`
+and restart. Anthropic gives $5 of free credits for a verified phone number,
+which is far more than this project needs.
+
+<details>
+<summary>Manual setup, step by step</summary>
+
+
 ```powershell
 # --- backend ---
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
@@ -49,6 +68,8 @@ npm install
 npm run dev           # http://localhost:5173
 ```
 
+</details>
+
 Customer chat at `/`, staff console at `/admin`.
 
 ## Documentation
@@ -60,20 +81,4 @@ Customer chat at `/`, staff console at `/admin`.
 | [`backend/docs/RECOVERY.md`](backend/docs/RECOVERY.md) | Execution guarantees and crash recovery |
 | [`backend/docs/RAG.md`](backend/docs/RAG.md) | Ingestion, retrieval, untrusted document content |
 | [`frontend/README.md`](frontend/README.md) | Routes, auth handling, accessibility, bundle |
-
-## Demo script
-
-1. Sign in at `/admin` and show the **Overview** — live counts, not fixtures.
-2. **Knowledge Base** → inspect `Terms of Service`. It has a flagged
-   passage; open it and read the injected instructions.
-3. Go to `/` and ask about the cancellation policy. The answer is cited.
-4. Ask to cancel the appointment. The reply says it needs staff approval.
-5. **Approvals** → review the request. Show the exact parameters and the
-   SHA-256 your decision is bound to. Approve it.
-6. **Audit Logs** → filter by the action request. Three rows: the agent
-   proposed, a named human decided, the system executed.
-7. **Agent Controls** → emergency stop. Return to the chat and show the
-   next tool call being refused.
-
-Point at the injected document again and note that the agent read it and
-still could not act. That is the product.
+| [`DEMO.md`](DEMO.md) | Recording script, timings, and interview questions |
