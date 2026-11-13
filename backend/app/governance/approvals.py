@@ -15,13 +15,14 @@ Flow for an approval:
     6. EXECUTING -> EXECUTED | FAILED
     7. audit the execution            (EXECUTION row)
 """
+import hmac
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
 from app.governance.action_requests import (
-    ActionRequestConflict, claim_for_execution, mark_approved, mark_executed,
-    mark_failed, mark_rejected,
+    ActionRequestConflict, claim_for_execution, mark_approved, mark_failed,
+    mark_rejected,
 )
 from app.governance.audit import write_audit
 from app.governance.engine import GovernanceEngine, GovernanceResult
@@ -51,16 +52,25 @@ def _require_pending(request: ActionRequest) -> None:
         )
 
 
-def _check_hash(request: ActionRequest, expected_params_hash: str | None) -> None:
+def _check_hash(request: ActionRequest, expected_params_hash: str) -> None:
     """Bind the decision to the parameters the administrator was shown.
+
+    MANDATORY. There is no internal path that skips this: the parameter has
+    no default, so a caller that forgets it fails with a TypeError rather
+    than silently approving unverified parameters. An optional check is not
+    a check -- it is a check plus a bypass.
 
     The client sends back the hash it displayed. If the stored row has
     changed in between, the hashes differ and the decision is refused
-    rather than silently applied to different parameters.
+    rather than being applied to parameters nobody reviewed.
     """
-    if expected_params_hash is None:
-        return
-    if expected_params_hash != request.params_hash:
+    if not expected_params_hash or not isinstance(expected_params_hash, str):
+        raise ParamsHashMismatch(
+            "A params_hash is required to decide on an action request."
+        )
+    # Constant-time comparison: these are not secrets, but the habit costs
+    # nothing and the next hash-like value compared here might be.
+    if not hmac.compare_digest(expected_params_hash, request.params_hash):
         raise ParamsHashMismatch(
             "The action's parameters have changed since they were shown to "
             "you. Review the request again."
@@ -81,8 +91,8 @@ def reject(
     request: ActionRequest,
     *,
     admin: AdminUser,
+    expected_params_hash: str,
     note: str | None = None,
-    expected_params_hash: str | None = None,
 ) -> ApprovalOutcome:
     _require_pending(request)
     _check_hash(request, expected_params_hash)
@@ -114,8 +124,8 @@ def approve_and_execute(
     request: ActionRequest,
     *,
     admin: AdminUser,
+    expected_params_hash: str,
     note: str | None = None,
-    expected_params_hash: str | None = None,
 ) -> ApprovalOutcome:
     _require_pending(request)
     _check_hash(request, expected_params_hash)
@@ -156,11 +166,16 @@ def execute_approved(db: Session, request_id: int) -> GovernanceResult:
     engine = GovernanceEngine(
         db, agent_id=claimed.agent_id, conversation_id=claimed.conversation_id
     )
+    # The engine performs EXECUTING -> EXECUTED inside the same transaction
+    # as the business change, and parks the request as FAILED on an error.
     result = engine.execute_approved(claimed)
 
-    if result.outcome is Outcome.EXECUTED:
-        mark_executed(db, claimed.id, result.data)
-    else:
+    # Pre-execution refusals (tampered params, kill switch, revoked
+    # permission) return before the engine touches the status, so the row
+    # is still EXECUTING. Park it.
+    db.expire_all()
+    current = db.get(ActionRequest, claimed.id)
+    if current is not None and current.status is ActionRequestStatus.EXECUTING:
         mark_failed(db, claimed.id, result.message)
 
     return result

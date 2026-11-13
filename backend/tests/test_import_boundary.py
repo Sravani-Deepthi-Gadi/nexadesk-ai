@@ -93,3 +93,36 @@ def test_every_catalog_entry_has_exactly_one_implementation():
     from app.tools.registry import TOOL_REGISTRY
 
     assert set(TOOL_CATALOG) == set(TOOL_REGISTRY)
+
+
+TOOLS_DIR = pathlib.Path(__file__).resolve().parents[1] / "app" / "tools"
+
+
+def test_tool_implementations_never_commit():
+    """Tools must not own the transaction boundary.
+
+    The engine commits the business change and the action request's
+    EXECUTING -> EXECUTED transition together. A tool that commits on its
+    own splits that into two transactions and reopens the crash window
+    where an action is performed but the request never reaches EXECUTED --
+    at which point recovery can no longer tell whether it happened.
+
+    registry.py is excluded: it only wires names to functions.
+    """
+    offenders: list[str] = []
+    for path in sorted(TOOLS_DIR.rglob("*.py")):
+        if path.name in {"registry.py", "__init__.py"}:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "commit"
+            ):
+                offenders.append(f"{path.name}:{node.lineno} calls .commit()")
+
+    assert not offenders, (
+        "Tool implementations must flush, not commit -- the governance "
+        f"engine owns the transaction. Violations: {offenders}"
+    )

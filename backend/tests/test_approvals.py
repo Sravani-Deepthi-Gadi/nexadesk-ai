@@ -95,7 +95,8 @@ def test_rejection_never_executes(client, db, admin_user, pending_request, booke
 
 
 def test_rejected_request_cannot_be_executed_afterwards(db, admin_user, pending_request, booked_appointment):
-    reject(db, pending_request, admin=admin_user, note="no")
+    reject(db, pending_request, admin=admin_user,
+           expected_params_hash=pending_request.params_hash, note="no")
 
     # There is no API route to execute directly; call the service to prove
     # that even internal misuse cannot run a rejected action.
@@ -107,11 +108,14 @@ def test_rejected_request_cannot_be_executed_afterwards(db, admin_user, pending_
 
 
 def test_rejected_request_cannot_then_be_approved(db, admin_user, pending_request):
-    reject(db, pending_request, admin=admin_user)
+    reject(db, pending_request, admin=admin_user,
+           expected_params_hash=pending_request.params_hash)
     db.expire_all()
     row = db.get(ActionRequest, pending_request.id)
     with pytest.raises(ActionRequestConflict):
-        approve_and_execute(db, row, admin=admin_user)
+        approve_and_execute(
+            db, row, admin=admin_user, expected_params_hash=row.params_hash
+        )
 
 
 # ==========================================================================
@@ -304,7 +308,10 @@ def test_duplicate_approval_is_refused(client, db, admin_user, pending_request):
 
 
 def test_duplicate_execution_is_impossible(db, admin_user, pending_request, booked_appointment):
-    approve_and_execute(db, pending_request, admin=admin_user)
+    approve_and_execute(
+        db, pending_request, admin=admin_user,
+        expected_params_hash=pending_request.params_hash,
+    )
 
     db.expire_all()
     assert db.get(ActionRequest, pending_request.id).status is ActionRequestStatus.EXECUTED
@@ -378,7 +385,10 @@ def test_permission_revoked_after_approval_blocks_execution(db, agent, admin_use
 # 10. Audit logging across the whole lifecycle
 # ==========================================================================
 def test_full_lifecycle_produces_three_linked_audit_rows(db, admin_user, pending_request):
-    approve_and_execute(db, pending_request, admin=admin_user, note="ok")
+    approve_and_execute(
+        db, pending_request, admin=admin_user,
+        expected_params_hash=pending_request.params_hash, note="ok",
+    )
 
     rows = (
         db.query(AuditLog)
@@ -399,7 +409,10 @@ def test_full_lifecycle_produces_three_linked_audit_rows(db, admin_user, pending
 
 
 def test_rejection_is_audited(db, admin_user, pending_request):
-    reject(db, pending_request, admin=admin_user, note="against policy")
+    reject(
+        db, pending_request, admin=admin_user,
+        expected_params_hash=pending_request.params_hash, note="against policy",
+    )
     row = (
         db.query(AuditLog)
         .filter(
@@ -413,7 +426,10 @@ def test_rejection_is_audited(db, admin_user, pending_request):
 
 
 def test_audit_endpoint_filters_by_action_request(client, db, admin_user, pending_request):
-    approve_and_execute(db, pending_request, admin=admin_user)
+    approve_and_execute(
+        db, pending_request, admin=admin_user,
+        expected_params_hash=pending_request.params_hash,
+    )
     resp = client.get(
         f"/api/admin/audit?action_request_id={pending_request.id}",
         headers=auth(admin_user),
@@ -425,9 +441,89 @@ def test_audit_endpoint_filters_by_action_request(client, db, admin_user, pendin
 def test_audit_rows_remain_append_only_after_approval(db, admin_user, pending_request):
     from app.governance.audit import AuditImmutabilityError
 
-    approve_and_execute(db, pending_request, admin=admin_user)
+    approve_and_execute(
+        db, pending_request, admin=admin_user,
+        expected_params_hash=pending_request.params_hash,
+    )
     row = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     row.error_message = "tampered"
     with pytest.raises(AuditImmutabilityError):
         db.commit()
     db.rollback()
+
+
+# ==========================================================================
+# 11. Hash verification is mandatory (hardening pass)
+# ==========================================================================
+def test_approve_without_hash_is_a_type_error(db, admin_user, pending_request, booked_appointment):
+    """No internal path can skip verification: the argument has no default."""
+    with pytest.raises(TypeError, match="expected_params_hash"):
+        approve_and_execute(db, pending_request, admin=admin_user)  # type: ignore[call-arg]
+
+    db.refresh(booked_appointment)
+    assert booked_appointment.status is AppointmentStatus.BOOKED
+
+
+def test_reject_without_hash_is_a_type_error(db, admin_user, pending_request):
+    with pytest.raises(TypeError, match="expected_params_hash"):
+        reject(db, pending_request, admin=admin_user)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("bad_hash", ["", "   ", "0" * 64, "short"])
+def test_approve_with_bad_hash_is_refused(db, admin_user, pending_request, booked_appointment, bad_hash):
+    with pytest.raises(approval_service.ParamsHashMismatch):
+        approve_and_execute(
+            db, pending_request, admin=admin_user, expected_params_hash=bad_hash
+        )
+
+    db.expire_all()
+    assert db.get(ActionRequest, pending_request.id).status is ActionRequestStatus.PENDING
+    db.refresh(booked_appointment)
+    assert booked_appointment.status is AppointmentStatus.BOOKED
+
+
+@pytest.mark.parametrize("bad_hash", ["", "0" * 64])
+def test_reject_with_bad_hash_is_refused(db, admin_user, pending_request, bad_hash):
+    with pytest.raises(approval_service.ParamsHashMismatch):
+        reject(db, pending_request, admin=admin_user, expected_params_hash=bad_hash)
+
+    db.expire_all()
+    assert db.get(ActionRequest, pending_request.id).status is ActionRequestStatus.PENDING
+
+
+def test_reject_endpoint_with_stale_hash_returns_409(client, db, admin_user, pending_request):
+    resp = client.post(
+        f"/api/admin/approvals/{pending_request.id}/reject",
+        json={"params_hash": "f" * 64}, headers=auth(admin_user),
+    )
+    assert resp.status_code == 409
+    db.expire_all()
+    assert db.get(ActionRequest, pending_request.id).status is ActionRequestStatus.PENDING
+
+
+def test_hash_of_another_request_does_not_authorise_this_one(db, agent, admin_user, booked_appointment):
+    """A valid hash is not a master key -- it must be THIS request's hash."""
+    from app.governance.engine import GovernanceEngine
+
+    grant(db, agent, Permission.CANCEL_APPOINTMENT)
+    engine = GovernanceEngine(db, agent_id=agent.id)
+    first = db.get(
+        ActionRequest,
+        engine.execute(
+            "cancel_appointment",
+            {"appointment_id": booked_appointment.id, "reason": "one"},
+        ).action_request_id,
+    )
+    second = db.get(
+        ActionRequest,
+        engine.execute(
+            "cancel_appointment",
+            {"appointment_id": booked_appointment.id, "reason": "two"},
+        ).action_request_id,
+    )
+    assert first.params_hash != second.params_hash
+
+    with pytest.raises(approval_service.ParamsHashMismatch):
+        approve_and_execute(
+            db, second, admin=admin_user, expected_params_hash=first.params_hash
+        )

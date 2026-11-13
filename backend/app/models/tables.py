@@ -239,6 +239,16 @@ class ActionRequest(Base):
     decided_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"))
     decision_note: Mapped[str | None] = mapped_column(Text)
 
+    #: Set when a worker claims the request. Used to spot requests stranded
+    #: in EXECUTING by a crash -- see app/governance/recovery.py.
+    execution_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    #: Incremented on every claim. A request that keeps crashing mid-flight
+    #: is parked for a human rather than retried forever.
+    execution_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result_json: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)

@@ -3,6 +3,14 @@
 This is a real state change, not a stub. The governance tests assert that
 it is NOT reached when the agent lacks CANCEL_APPOINTMENT, by checking the
 appointment row is still 'booked' afterwards.
+
+TRANSACTION CONTRACT: tool implementations must NEVER commit. They flush so
+their changes are visible within the caller's transaction, and the
+governance engine commits the business change together with the action
+request's status transition. That single commit is what makes crash
+recovery decidable -- see docs/RECOVERY.md.
+
+tests/test_import_boundary.py fails the build if a tool calls commit().
 """
 from datetime import datetime, timezone
 
@@ -26,7 +34,8 @@ def cancel_appointment(db: Session, params: CancelAppointmentParams) -> dict:
 
     appt.status = AppointmentStatus.CANCELLED
     appt.cancelled_at = datetime.now(timezone.utc)
-    db.commit()
+    # flush, not commit: the engine owns the transaction boundary.
+    db.flush()
 
     return {
         "appointment_id": appt.id,

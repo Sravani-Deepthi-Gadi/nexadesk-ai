@@ -1,4 +1,4 @@
-# NexaDesk AI — Backend (Milestone 2)
+# NexaDesk AI — Backend (Milestone 2, final)
 
 An AI business concierge with an enterprise agent governance layer.
 
@@ -74,7 +74,10 @@ Four properties hold, and each has a test that fails without it:
 canonically (sorted keys, no incidental whitespace) with
 `params_hash = sha256(tool_name + canonical_params)`. The approve and
 reject endpoints *require* the client to send back the hash it displayed; a
-mismatch is a 409. The executor re-derives the hash from storage and
+mismatch is a 409. `expected_params_hash` is a keyword argument **with no
+default**, so an internal caller that omits it fails with a `TypeError`
+rather than approving unverified parameters — an optional check is a check
+plus a bypass. The executor re-derives the hash from storage and
 compares again before running. An administrator approves one specific
 action, not "whatever is in that row by the time it executes."
 
@@ -91,12 +94,21 @@ request against a file-backed database and asserts exactly one wins —
 swapping in the naive implementation makes all eight succeed and the
 appointment gets cancelled eight times.
 
-**3. Approval is not a bypass of governance.** Minutes may pass between a
+**3. Execution is at-most-once, and a crash is recoverable.** The
+business change and the `EXECUTING → EXECUTED` transition commit *together*,
+so a request found in `EXECUTING` after a restart proves the action never
+happened and can be safely retried. Tools therefore must not commit, and
+`tests/test_import_boundary.py` fails the build if one does. This is **not**
+exactly-once — see [`docs/RECOVERY.md`](docs/RECOVERY.md) for the precise
+guarantee, the assumption it rests on, and the one window that cannot be
+closed.
+
+**4. Approval is not a bypass of governance.** Minutes may pass between a
 decision and execution, so `execute_approved()` re-checks the emergency
 stop and re-checks the agent's permission. An agent disabled after approval
 does not get to act.
 
-**4. The LLM cannot approve its own actions.** `decided_by_admin_id` is a
+**5. The LLM cannot approve its own actions.** `decided_by_admin_id` is a
 foreign key to `admin_users`, set only behind JWT plus a role check, and
 the import boundary above means no module the agent can reach even contains
 the approval code.
@@ -166,7 +178,7 @@ The suite runs against in-memory SQLite with a scripted fake LLM: no
 network, no cost, deterministic. The concurrency tests use a temporary
 file-backed database, because threads need to see each other's writes.
 
-**Actual result: 48 passed.**
+**Actual result: 72 passed.**
 
 ### Run the server
 
@@ -177,6 +189,7 @@ uvicorn app.main:app --reload
 - Health check: http://127.0.0.1:8000/api/health
 - Interactive API docs: http://127.0.0.1:8000/docs
 - Full API reference: [`docs/API.md`](docs/API.md)
+- Execution guarantees and crash recovery: [`docs/RECOVERY.md`](docs/RECOVERY.md)
 
 ```powershell
 # Try a real turn (requires ANTHROPIC_API_KEY)
@@ -238,6 +251,30 @@ That absence is what the headline test exercises.
 | `test_login_does_not_reveal_whether_an_email_exists` | No account enumeration |
 | `test_full_lifecycle_produces_three_linked_audit_rows` | Invocation → decision → execution, all linked |
 
+### Hardening — mandatory hash verification
+
+| Test | Claim |
+|---|---|
+| `test_approve_without_hash_is_a_type_error` | No internal path can skip verification |
+| `test_reject_without_hash_is_a_type_error` | Same for rejection |
+| `test_approve_with_bad_hash_is_refused` | Empty, blank, wrong and malformed hashes all refused |
+| `test_hash_of_another_request_does_not_authorise_this_one` | A valid hash is not a master key |
+
+### Crash recovery (`tests/test_crash_recovery.py`)
+
+| Test | Claim |
+|---|---|
+| `test_tool_failure_rolls_back_the_business_change` | A tool that mutates then raises changes nothing |
+| `test_interrupted_execution_leaves_no_business_change` | Failure between flush and commit is invisible |
+| `test_stranded_request_is_found` | Crashed work is detectable |
+| `test_recently_claimed_request_is_left_alone` | Recovery does not fight a live worker |
+| `test_recovery_returns_stranded_request_to_approved` | Stranded work becomes retryable |
+| `test_recovered_request_executes_exactly_once` | Interrupt → recover → retry → performed once |
+| `test_repeatedly_interrupted_request_is_abandoned_not_retried_forever` | Poison requests stop after 3 attempts |
+| `test_execution_without_audit_row_is_detected` | The unclosable window is at least visible |
+| `test_reconciliation_reports_but_never_fabricates_audit_rows` | No invented audit evidence |
+| `test_tool_implementations_never_commit` | The transaction boundary cannot regress |
+
 ### Concurrency (`tests/test_concurrency.py`)
 
 Eight threads, one request, a real file-backed database:
@@ -282,17 +319,25 @@ These are real. None of them is hidden behind a passing test.
 
 **Functional**
 
-8. **The customer is not notified when their action is approved.** The
+8. **Execution is at-most-once, not exactly-once.** A crash between the
+   business commit and the audit write leaves an executed action with no
+   `EXECUTION` audit row. It is detected and reported, never fabricated.
+   Full detail and the assumptions involved: [`docs/RECOVERY.md`](docs/RECOVERY.md).
+9. **Recovery assumes tools have no side effects outside the transaction.**
+   True today. False the moment a tool calls an external booking API, and
+   at that point `app/governance/recovery.py` must change before the tool
+   ships.
+10. **The customer is not notified when their action is approved.** The
    conversation returns to `active`, but there is no push or polling
    endpoint yet, so the customer has to send another message to learn the
    outcome.
-9. **Pending requests never expire.** A request approved three weeks late
+11. **Pending requests never expire.** A request approved three weeks late
    still executes, subject to the re-checks. A TTL and an `EXPIRED` status
    belong in the state machine.
-10. **Risk levels are static per tool.** Cancelling a £10 appointment and a
+12. **Risk levels are static per tool.** Cancelling a £10 appointment and a
     £10,000 one are both HIGH. Real systems score risk on parameters too.
-11. **Single agent identity.** The schema supports many; the app seeds one.
-12. **Context trimming is by message count, not token budget.**
+13. **Single agent identity.** The schema supports many; the app seeds one.
+14. **Context trimming is by message count, not token budget.**
 
 ## Next
 

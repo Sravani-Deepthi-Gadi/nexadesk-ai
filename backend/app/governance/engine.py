@@ -25,7 +25,8 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.governance.action_requests import (
-    ParamsTamperedError, create_action_request, verify_params_hash,
+    ParamsTamperedError, create_action_request, mark_executed, mark_failed,
+    verify_params_hash,
 )
 from app.governance.audit import write_audit
 from app.governance.kill_switch import is_agent_enabled
@@ -192,6 +193,10 @@ class GovernanceEngine:
         try:
             data = spec.impl(self.db, params)
         except ToolExecutionError as exc:
+            # The implementation may have mutated objects before failing.
+            # Roll back first, or the audit write's commit would persist
+            # a half-finished change.
+            self.db.rollback()
             log_id = self._audit(
                 tool_name=tool_name, params=params.model_dump(),
                 risk_level=spec.risk_level,
@@ -204,6 +209,7 @@ class GovernanceEngine:
                 audit_log_id=log_id, risk_level=spec.risk_level,
             )
         except Exception as exc:  # unexpected: log, never leak internals
+            self.db.rollback()
             log_id = self._audit(
                 tool_name=tool_name, params=params.model_dump(),
                 risk_level=spec.risk_level,
@@ -218,6 +224,10 @@ class GovernanceEngine:
                 audit_log_id=log_id, risk_level=spec.risk_level,
             )
 
+        # The implementation flushed but did not commit. write_audit's
+        # commit therefore persists the business change and its audit row
+        # in a single transaction: a LOW/MEDIUM-risk action can never be
+        # committed without the audit row that records it.
         log_id = self._audit(
             tool_name=tool_name, params=params.model_dump(),
             risk_level=spec.risk_level,
@@ -321,10 +331,19 @@ class GovernanceEngine:
             )
 
         # --- validate and run --------------------------------------------
+        # THE ATOMIC UNIT. The implementation flushes without committing,
+        # mark_executed joins the same transaction, and one commit persists
+        # both. A crash before that commit leaves the request in EXECUTING
+        # with NO business change -- which is what makes recovery decidable.
+        # See docs/RECOVERY.md.
         try:
             params = spec.params_model.model_validate(raw_params)
             data = spec.impl(self.db, params)
+            mark_executed(self.db, request.id, data, commit=False)
+            self.db.commit()
         except (ToolExecutionError, ValidationError) as exc:
+            self.db.rollback()
+            self._fail_request(request.id, str(exc))
             log_id = self._audit(
                 tool_name=request.tool_name, params=raw_params,
                 risk_level=request.risk_level,
@@ -340,6 +359,8 @@ class GovernanceEngine:
                 action_request_id=request.id,
             )
         except Exception as exc:
+            self.db.rollback()
+            self._fail_request(request.id, f"{type(exc).__name__}: {exc}")
             log_id = self._audit(
                 tool_name=request.tool_name, params=raw_params,
                 risk_level=request.risk_level,
@@ -357,6 +378,10 @@ class GovernanceEngine:
                 action_request_id=request.id,
             )
 
+        # Committed. Everything from here is the audit record, and a crash
+        # in this gap leaves an executed action with no EXECUTION row --
+        # the one window that cannot be closed without two-phase commit.
+        # app/governance/recovery.py detects it.
         log_id = self._audit(
             tool_name=request.tool_name, params=raw_params,
             risk_level=request.risk_level,
@@ -371,3 +396,16 @@ class GovernanceEngine:
             audit_log_id=log_id, risk_level=request.risk_level,
             action_request_id=request.id,
         )
+
+    def _fail_request(self, request_id: int, error: str) -> None:
+        """Park a request as FAILED after a rolled-back attempt.
+
+        Best-effort: if the row has already moved on (another worker, or a
+        crash mid-transition) there is nothing sensible to do here, and
+        raising would mask the original error.
+        """
+        from app.governance.action_requests import ActionRequestConflict
+        try:
+            mark_failed(self.db, request_id, error)
+        except ActionRequestConflict:
+            self.db.rollback()

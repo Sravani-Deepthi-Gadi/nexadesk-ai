@@ -98,12 +98,17 @@ def _transition(
     *,
     expected_from: ActionRequestStatus,
     to: ActionRequestStatus,
+    commit: bool = True,
     **values: Any,
 ) -> ActionRequest:
     """Atomically move a request from one status to another.
 
     Raises ActionRequestConflict if the row was not in `expected_from`,
     which is exactly the duplicate-decision and duplicate-execution case.
+
+    With commit=False the UPDATE joins the caller's open transaction instead
+    of committing on its own. That is how the business change and the
+    EXECUTING -> EXECUTED transition become a single commit.
     """
     stmt = (
         update(ActionRequest)
@@ -115,7 +120,8 @@ def _transition(
         .execution_options(synchronize_session=False)
     )
     result = db.execute(stmt)
-    db.commit()
+    if commit:
+        db.commit()
 
     if result.rowcount != 1:
         db.expire_all()
@@ -127,7 +133,8 @@ def _transition(
             f"not '{expected_from.value}'."
         )
 
-    db.expire_all()
+    if commit:
+        db.expire_all()
     return db.get(ActionRequest, request_id)
 
 
@@ -158,19 +165,34 @@ def mark_rejected(
 
 
 def claim_for_execution(db: Session, request_id: int) -> ActionRequest:
-    """APPROVED -> EXECUTING. Only one caller can ever win this."""
+    """APPROVED -> EXECUTING. Only one caller can ever win this.
+
+    Records the claim time and bumps the attempt counter so that a request
+    stranded by a crash can be found, and so a request that crashes the
+    process repeatedly stops being retried.
+    """
     return _transition(
         db, request_id,
         expected_from=ActionRequestStatus.APPROVED,
         to=ActionRequestStatus.EXECUTING,
+        execution_started_at=datetime.now(timezone.utc),
+        execution_attempts=ActionRequest.execution_attempts + 1,
     )
 
 
-def mark_executed(db: Session, request_id: int, result: dict[str, Any]) -> ActionRequest:
+def mark_executed(
+    db: Session, request_id: int, result: dict[str, Any], *, commit: bool = True
+) -> ActionRequest:
+    """EXECUTING -> EXECUTED.
+
+    Called with commit=False from the engine so that this transition lands
+    in the SAME commit as the business change it describes.
+    """
     return _transition(
         db, request_id,
         expected_from=ActionRequestStatus.EXECUTING,
         to=ActionRequestStatus.EXECUTED,
+        commit=commit,
         executed_at=datetime.now(timezone.utc),
         result_json=json.dumps(result, default=str),
     )

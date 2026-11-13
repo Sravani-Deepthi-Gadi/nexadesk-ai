@@ -2,6 +2,7 @@
 
 Run it with:  uvicorn app.main:app --reload
 """
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,8 +15,10 @@ from app.api.admin import auth as admin_auth
 from app.config import get_settings
 from app.db.seed import seed, seed_admin
 from app.db.session import SessionLocal, init_db
+from app.governance.recovery import run_recovery
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -25,6 +28,18 @@ async def lifespan(app: FastAPI):
     try:
         seed(db, agent_name=settings.default_agent_name)
         seed_admin(db)
+
+        # Sweep for work interrupted by a previous crash. Stranded requests
+        # go back to APPROVED; they are NOT auto-executed, so a restart
+        # never silently re-runs a human-approved action.
+        report = run_recovery(db)
+        if not report.is_clean:
+            logger.warning(
+                "Startup recovery: %d recovered, %d abandoned, "
+                "%d executed without an audit row (ids: %s)",
+                len(report.recovered), len(report.abandoned),
+                len(report.unaudited), report.unaudited,
+            )
     finally:
         db.close()
     yield
